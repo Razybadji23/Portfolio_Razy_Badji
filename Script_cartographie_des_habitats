@@ -1,0 +1,161 @@
+var zone = geometry;
+
+var DATE_DEBUT = '2022-02-01';
+var DATE_FIN   = '2022-03-01';  
+var date = '2022_02';        
+
+// ============================================================
+// Définition des échantillons d'entrainements
+// ============================================================
+var habitats = eau.merge(marais).merge(foret).merge(sol_nu);
+
+// ============================================================
+// Masquages des nuages
+// ============================================================
+
+function maskS2(image) {
+
+  var scl = image.select('SCL');
+
+  var mask = scl.neq(3)     // ombres de nuages
+    .and(scl.neq(8))        // nuages probabilité moyenne
+    .and(scl.neq(9))        // nuages probabilité élevée
+    .and(scl.neq(10));      // cirrus
+
+  return image.updateMask(mask);
+}
+
+// ============================================================
+// Collection
+// ============================================================
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(zone)
+  .filterDate(DATE_DEBUT, DATE_FIN)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 60))
+  .map(maskS2);
+
+print('Nombre d\'images trouvées :', s2.size());
+
+// ============================================================
+// Composite médian
+// ============================================================
+
+var image = s2.median().clip(zone);
+
+Map.centerObject(zone, 10);
+
+// ============================================================
+// Composition colorée
+// ============================================================
+
+var VC = { min: 0, max: 3000, bands: ['B4', 'B3', 'B2']};
+var FC = {min: 0, max: 3000, bands: ['B8', 'B4', 'B3']};
+
+Map.addLayer(image.clip(zone), VC, 'RGB');
+Map.addLayer(image.clip(zone), FC, 'Fausse_Couleur');
+
+// Indices
+
+var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+var mndwi2 = image.normalizedDifference(['B3', 'B12']).rename('MNDWI2');
+
+// Visualisation
+
+var ndviVis = { min: -1, max: 1, palette: ['red', 'yellow', 'green']};
+var mndwiVis = { min: -1, max: 1, palette: ['white', 'green', 'blue']};
+
+Map.addLayer(ndvi.clip(zone), ndviVis,  'NDVI');
+Map.addLayer(mndwi2.clip(zone), mndwiVis, 'MNDWI2');
+
+// Variables d'entrées
+
+var image_RF = image.addBands(ndvi).addBands(mndwi2);
+
+// variables
+var bands = ['B2', 'B3', 'B4', 'B8', 'B12', 'NDVI', 'MNDWI2'];
+var stack = image_RF.select(bands);
+
+// Classification Random Forest
+
+var train = stack.sampleRegions({
+  collection: habitats,
+  properties: ['class'],
+  scale: 10
+}).randomColumn();
+
+var trainingSample = train.filter('random <= 0.7');
+var validationSample = train.filter('random > 0.7');
+
+var classifier = ee.Classifier.smileRandomForest(500).train({
+  features: trainingSample,
+  classProperty: 'class',
+  inputProperties: bands
+});
+
+var classif = stack.classify(classifier);
+Map.addLayer(classif.clip(zone), {
+  min: 1,
+  max: 4,
+  palette: ["#0e22ff", "#59ff9a", "#1f831d", "#ffcb9f"]
+}, 'Habitats_Fitri_ ' + date);
+
+
+// Importance des variables 
+var importance = ee.Dictionary(classifier.explain().get('importance'));
+var fcImportance = ee.FeatureCollection(
+  importance.keys().map(function(k) {
+    return ee.Feature(null, {
+      variable: k,
+      importance: importance.get(k)
+    });
+  })
+).sort('importance', true);   
+
+// Graphique
+var chart = ui.Chart.feature.byFeature(fcImportance, 'variable', 'importance')
+  .setChartType('BarChart')    
+  .setOptions({
+    title: 'Importance des variables - Random Forest lac Fitri',
+    hAxis: {title: 'Importance (Mean Decrease in Impurity)'},
+    vAxis: {title: 'Variable'},
+    legend: {position: 'none'}
+  });
+print(chart);
+
+// =========================
+// Évaluation de la classification
+// =========================
+
+var validated = validationSample.classify(classifier);
+var matrix = validated.errorMatrix('class', 'classification');
+print('Validation error matrix', matrix);
+print('Validation accuracy', matrix.accuracy());
+print('Kappa', matrix.kappa());
+print('F1 score', matrix.fscore());
+print('Consumers Accuracy', matrix.consumersAccuracy());
+print('Producers Accuracy', matrix.producersAccuracy());
+print('Classifier details', classifier.explain());
+
+// =========================
+// Export
+// =========================
+
+Export.image.toDrive({
+  image: classif,
+  description: 'Habitats_Fitri_' + date,
+  region: geometry,
+  scale: 10,
+  crs: 'EPSG:32633',
+  maxPixels: 1e13,
+  formatOptions: { cloudOptimized: true }
+});
+
+Export.image.toDrive({
+  image: ndvi,
+  description: 'NDVI_Fitri_' + date,
+  region: zone,
+  scale: 10,
+  crs: 'EPSG:32633',
+  maxPixels: 1e13,
+  formatOptions: { cloudOptimized: true }
+});
