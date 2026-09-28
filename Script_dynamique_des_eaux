@@ -1,0 +1,86 @@
+var zone = geometry;
+var anneeDebut = 2016;
+var anneeFin = 2026;
+var seuil = 0;
+
+// Masque nuages
+function maskS2(img) {
+  var scl = img.select('SCL');
+  var mask = scl.neq(1).and(scl.neq(3))
+    .and(scl.neq(8)).and(scl.neq(9))
+    .and(scl.neq(10)).and(scl.neq(11));
+  return img.updateMask(mask);
+}
+
+// Sentinel-2
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(zone)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+  .map(maskS2);
+
+// Calcul annuel janvier-avril
+function dynamique(annee) {
+  annee = ee.Number(annee);
+
+  var debut = ee.Date.fromYMD(annee, 1, 1);
+  var fin = ee.Date.fromYMD(annee, 5, 1);
+
+  var collection = s2.filterDate(debut, fin);
+
+  var eau = collection.map(function(img) {
+    return img.normalizedDifference(['B3', 'B12'])
+      .gt(seuil)
+      .rename('eau');
+  });
+
+  return eau.mean()
+    .rename('frequence_eau')
+    .clip(zone)
+    .set('annee', annee)
+    .set('nombre_images', collection.size())
+    .set('system:time_start', debut.millis());
+}
+
+// Collection annuelle
+var annees = ee.List.sequence(anneeDebut, anneeFin);
+
+var dynamiqueEau = ee.ImageCollection.fromImages(
+  annees.map(dynamique)
+);
+
+print('Dynamique annuelle', dynamiqueEau);
+print('Nombre images/an',
+      dynamiqueEau.aggregate_array('nombre_images'));
+
+// Affichage
+var vis = {
+  min: 0.3,
+  max: 1,
+  palette: ['white', 'lightblue', 'blue', 'darkblue']
+};
+
+Map.centerObject(zone, 10);
+
+for (var annee = anneeDebut; annee <= anneeFin; annee++) {
+
+  var image = dynamiqueEau
+    .filter(ee.Filter.eq('annee', annee))
+    .first();
+
+  Map.addLayer(
+    image,
+    vis,
+    'Dynamique eau ' + annee,
+    false
+  );
+
+  Export.image.toDrive({
+    image: image,
+    description: 'Dynamique_eau_' + annee,
+    folder: 'Dynamique_eau',
+    fileNamePrefix: 'Dynamique_eau_' + annee,
+    region: zone,
+    scale: 20,
+    maxPixels: 1e13
+  });
+}
